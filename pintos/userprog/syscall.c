@@ -55,8 +55,9 @@ void syscall_handler(struct intr_frame *f UNUSED)
 		int status = (int)f->R.rdi;
 		printf("%s: exit(%d)\n", thread_current()->name, status);
 		thread_exit();
+		break;
 	}
-	break;
+
 	case SYS_FORK:
 		f->R.rax = process_fork((const char *)f->R.rdi, f);
 		break;
@@ -66,8 +67,18 @@ void syscall_handler(struct intr_frame *f UNUSED)
 	case SYS_WAIT:
 		f->R.rax = process_wait(f->R.rdi);
 		break;
+	case SYS_WRITE: // 열린 파일의 데이터를 기록하는 시스템 콜
+		int fd = (int)f->R.rdi;
+		const void *buffer = (const char *)f->R.rsi;
+		unsigned size = (unsigned)f->R.rdx;
+		if (fd == 1)
+		{
+			putbuf(buffer, size);
+			f->R.rdx = size; // write의 반환값 돌려주기
+		}
+		break;
 	}
 
-	printf("system call!\n");
-	thread_exit(); // wait으로 기다리게 하기?
+	// printf("system call!\n");
+	// thread_exit(); // wait으로 기다리게 하기?
 }
