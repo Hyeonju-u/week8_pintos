@@ -48,15 +48,16 @@ tid_t process_create_initd(const char *file_name) // 부모
 
 	/* Make a copy of FILE_NAME.
 	 * Otherwise there's a race between the caller and load(). */
+	// 명령줄 전체를 복사해서 자식에게 넘김
 	fn_copy = palloc_get_page(0);
 	if (fn_copy == NULL)
 		return TID_ERROR;
 	strlcpy(fn_copy, file_name, PGSIZE);
-
+	// 명령줄 첫단어로 잘라서 스레드 이름으로 씀 채점사항
 	/* Create a new thread to execute FILE_NAME. */
 	strlcpy(name_copy, file_name, sizeof(name_copy));
-	char *prog_name = strtok_r(name_copy, " ", &save_ptr); // 첫 토큰 = 프로그램 이름
-	tid = thread_create(prog_name, PRI_DEFAULT, initd, fn_copy);
+	char *prog_name = strtok_r(name_copy, " ", &save_ptr);	     // 첫 토큰 = 프로그램 이름
+	tid = thread_create(prog_name, PRI_DEFAULT, initd, fn_copy); // 새스레드를 만들고 그 스레드가 시작하면 initd 실행해라 자식에게 넘기는곳
 	if (tid == TID_ERROR)
 		palloc_free_page(fn_copy);
 	return tid;
@@ -173,69 +174,71 @@ int process_exec(void *f_name)
 {
 	char *file_name = f_name;
 	bool success;
-	char *token, *save_ptr; // 다음엔 어디부터 자를지 기억하는 책갈피
-	int argc = 0;
-	char *argv[LOADER_ARGS_LEN / 2 + 1];
-
-	for (token = strtok_r(file_name, " ", &save_ptr); token != NULL; token = strtok_r(NULL, " ", &save_ptr)) // 문자열 자르기
+	char *token, *save_ptr;		     // 지금 잘라낸조각,다음엔 어디부터 자를지 기억하는 포인터
+	int argc = 0;			     // 인자 개수담을곳
+	char *argv[LOADER_ARGS_LEN / 2 + 1]; // 명령줄 최대 128바이트 토큰 하나는 최소 글자 1공백 1 2바이트라 최대 64게+끝표시용
+	// 문자열 자르기
+	for (token = strtok_r(file_name, " ", &save_ptr); token != NULL; token = strtok_r(NULL, " ", &save_ptr))
 	{
-		argv[argc] = token; // 메인프로그램인자에 전달해주기위해서
-		argc++;
-	}
-	printf("argc = %d\n", argc);
-	for (int i = 0; i < argc; i++)
-		printf("argv[%d] = '%s'\n", i, argv[i]);
+		argv[argc] = token; // 지금칸에저장
+		argc++;		    // 다음 토큰을 다음 칸으로 넣기위해
+	};
 
 	/* We cannot use the intr_frame in the thread structure.
 	 * This is because when current thread rescheduled,
 	 * it stores the execution information to the member. */
-	// struct intr_frame if_;
 	struct intr_frame _if;
-	memset(&_if, 0, sizeof _if);
+	memset(&_if, 0, sizeof _if); // 전부 0으로 초기화
 	_if.ds = _if.es = _if.ss = SEL_UDSEG;
-	_if.cs = SEL_UCSEG;
-	_if.eflags = FLAG_IF | FLAG_MBS;
+	_if.cs = SEL_UCSEG;		 // 유저 코드 세그먼트(유저 모드실행)
+	_if.eflags = FLAG_IF | FLAG_MBS; // 인터럽트 허용
 
-	/* We first kill the current context */
-	process_cleanup();
+	/* We first kill the current context 현재 프로세스 기존 주소 공간정리*/
+	process_cleanup(); //
 
-	/* And then load the binary */
-	success = load(file_name, &_if);
+	/* And then load the binary  실행 파일 로드*/
+	success = load(file_name, &_if); //
 
 	/* If load failed, quit. */
-	if (!success)
+	if (!success) // 실패하면
 	{
 		palloc_free_page(file_name); // 위치 변경 기존:성공해도 메모리 반납
-		return -1;
+		return -1;		     // 종료
 	};
-	/* 스택쌓기 */
+	/* 스택쌓기 유저 프로그램은 커널 메모리를 볼수 없어 유저스택으로 복사 스택은 아래로 자라서 rsp를 먼저 내리고 그자리에쓰는게원칙*/
 	int len;
-	char *add[argc]; // 새로운 주소 담아둘 문자열
+	char *add[argc]; // 유저스택에 복사된 새로운 주소 담아둘 문자열
+	// 문자열 뒤에서 부터 복사
 	for (int i = argc - 1; i >= 0; i--)
 	{
 		len = strlen(argv[i]) + 1;
-		_if.rsp = _if.rsp - len;
-		add[i] = memcpy((void *)_if.rsp, argv[i], len);
+		_if.rsp = _if.rsp - len;			// len이쓸자리확보
+		add[i] = memcpy((void *)_if.rsp, argv[i], len); // 받는 곳 주소를 반환 = 새 주소
 	}
+	// 다음에 쌓을 주소들 8의 배수 위치에 두기위해
 	int pad = _if.rsp % 8; // 빼야할 양
 	_if.rsp -= pad;	       // 8의 배수로 내림
 	memset((void *)_if.rsp, 0, pad);
 	// rsp 8 내리기 → 그 8바이트를 0으로 채우기 두 줄
 	_if.rsp -= 8;
 	memset((void *)_if.rsp, 0, 8);
+	// 스택 주소 쌓기  argv[0]이 가장 낮은 주소에 있어야 argv[0], argv[1] 이 배열 모양이 됨
 	for (int i = argc - 1; i >= 0; i--)
 	{
 		_if.rsp -= 8;
-		memcpy((void *)_if.rsp, &add[i], 8);
+		memcpy((void *)_if.rsp, &add[i], 8); // 유저스택의 새 주소에 주소값 자체 8바이트를 복사
 	}
-	_if.R.rsi = _if.rsp;
+	// argc, argv의 인자를 레지스터로 전달 (x86-64: 1번째 rdi, 2번째 rsi)
+	_if.R.rsi = _if.rsp; // argv[0]이 있는 칸의 주소
 	_if.R.rdi = argc;
+	// 가짜리턴주소
 	_if.rsp -= 8;
 	memset((void *)_if.rsp, 0, 8);
 	/* Start switched process. */
+	// 반납가능
 	palloc_free_page(file_name);
 	do_iret(&_if); // 유저 모드로 돌아가기
-	NOT_REACHED();
+	NOT_REACHED(); // 여기로 돌아오지않음
 }
 
 /* Waits for thread TID to die and returns its exit status.  If
