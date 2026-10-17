@@ -26,7 +26,7 @@ static void process_cleanup(void);
 static bool load(const char *file_name, struct intr_frame *if_);
 static void initd(void *f_name);
 static void __do_fork(void *);
-
+static void argument_stack(char **argv, int argc, struct intr_frame *if_);
 /* General process initializer for initd and other process. */
 static void
 process_init(void)
@@ -189,7 +189,9 @@ int process_exec(void *f_name)
 	/* We cannot use the intr_frame in the thread structure.
 	 * This is because when current thread rescheduled,
 	 * it stores the execution information to the member. */
+	// struct intr_frame if_;
 	struct intr_frame _if;
+	memset(&_if, 0, sizeof _if);
 	_if.ds = _if.es = _if.ss = SEL_UDSEG;
 	_if.cs = SEL_UCSEG;
 	_if.eflags = FLAG_IF | FLAG_MBS;
@@ -201,12 +203,38 @@ int process_exec(void *f_name)
 	success = load(file_name, &_if);
 
 	/* If load failed, quit. */
-	palloc_free_page(file_name);
 	if (!success)
+	{
+		palloc_free_page(file_name); // 위치 변경 기존:성공해도 메모리 반납
 		return -1;
-
+	};
+	/* 스택쌓기 */
+	int len;
+	char *add[argc]; // 새로운 주소 담아둘 문자열
+	for (int i = argc - 1; i >= 0; i--)
+	{
+		len = strlen(argv[i]) + 1;
+		_if.rsp = _if.rsp - len;
+		add[i] = memcpy((void *)_if.rsp, argv[i], len);
+	}
+	int pad = _if.rsp % 8; // 빼야할 양
+	_if.rsp -= pad;	       // 8의 배수로 내림
+	memset((void *)_if.rsp, 0, pad);
+	// rsp 8 내리기 → 그 8바이트를 0으로 채우기 두 줄
+	_if.rsp -= 8;
+	memset((void *)_if.rsp, 0, 8);
+	for (int i = argc - 1; i >= 0; i--)
+	{
+		_if.rsp -= 8;
+		memcpy((void *)_if.rsp, &add[i], 8);
+	}
+	_if.R.rsi = _if.rsp;
+	_if.R.rdi = argc;
+	_if.rsp -= 8;
+	memset((void *)_if.rsp, 0, 8);
 	/* Start switched process. */
-	do_iret(&_if);
+	palloc_free_page(file_name);
+	do_iret(&_if); // 유저 모드로 돌아가기
 	NOT_REACHED();
 }
 
