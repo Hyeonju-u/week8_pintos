@@ -5,6 +5,7 @@
 #include <list.h>
 #include <stdint.h>
 #include "threads/interrupt.h"
+#include "threads/synch.h"      
 #ifdef VM
 #include "vm/vm.h"
 #endif
@@ -105,6 +106,13 @@ struct thread {
 #ifdef USERPROG
 	/* Owned by userprog/process.c. */
 	uint64_t *pml4;                     /* Page map level 4 */
+
+	/* Project 2: wait / exit */
+	int exit_status;                    /* exit(status)로 받은 종료 코드 */
+	struct list children;               /* 내가 만든 자식 스레드 목록 */
+	struct list_elem child_elem;        /* 부모의 children 리스트에 들어갈 고리 */
+	struct semaphore wait_sema;         /* 자식이 죽으면 up → 기다리던 부모가 깨어남 */
+	struct semaphore exit_sema;         /* 부모가 종료 코드를 읽으면 up → 자식이 마저 사라짐 */
 #endif
 #ifdef VM
 	/* Table for whole virtual memory owned by thread. */

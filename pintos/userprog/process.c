@@ -26,6 +26,7 @@ static void process_cleanup (void);
 static bool load (const char *file_name, struct intr_frame *if_);
 static void initd (void *f_name);
 static void __do_fork (void *);
+static void argument_stack (char **argv, int argc, struct intr_frame *if_);   /* ← 추가 */
 
 /* General process initializer for initd and other process. */
 static void
@@ -50,8 +51,15 @@ process_create_initd (const char *file_name) {
 		return TID_ERROR;
 	strlcpy (fn_copy, file_name, PGSIZE);
 
+	/* 스레드 이름은 명령줄 전체("args-single onearg")가 아니라
+	 * 프로그램 이름("args-single")만 쓴다. 종료 메시지에 이 이름이 찍힌다. */
+	char thread_name[16];
+	strlcpy (thread_name, file_name, sizeof thread_name);
+	char *save_ptr;
+	strtok_r (thread_name, " ", &save_ptr);
+
 	/* Create a new thread to execute FILE_NAME. */
-	tid = thread_create (file_name, PRI_DEFAULT, initd, fn_copy);
+	tid = thread_create (thread_name, PRI_DEFAULT, initd, fn_copy);
 	if (tid == TID_ERROR)
 		palloc_free_page (fn_copy);
 	return tid;
@@ -158,35 +166,156 @@ error:
 	thread_exit ();
 }
 
+
+
 /* Switch the current execution context to the f_name.
  * Returns -1 on fail. */
 int
 process_exec (void *f_name) {
-	char *file_name = f_name;
-	bool success;
+    char *command = f_name;
 
-	/* We cannot use the intr_frame in the thread structure.
-	 * This is because when current thread rescheduled,
-	 * it stores the execution information to the member. */
-	struct intr_frame _if;
-	_if.ds = _if.es = _if.ss = SEL_UDSEG;
-	_if.cs = SEL_UCSEG;
-	_if.eflags = FLAG_IF | FLAG_MBS;
+    /*]프로그램 이름을 포함해 최대 32개. */
+    char *argv[32];
+    uintptr_t user_argv[32];
+    int argc = 0;
 
-	/* We first kill the current context */
-	process_cleanup ();
+    char *save_ptr;
+    char *token;
 
-	/* And then load the binary */
-	success = load (file_name, &_if);
+    /* 1. 명령행을 공백으로 분리 */
+    for (token = strtok_r (command, " ", &save_ptr);
+         token != NULL;
+         token = strtok_r (NULL, " ", &save_ptr)) {
 
-	/* If load failed, quit. */
-	palloc_free_page (file_name);
-	if (!success)
-		return -1;
+        if (argc == 32) {
+            palloc_free_page (command);
+            return -1;
+        }
 
-	/* Start switched process. */
-	do_iret (&_if);
-	NOT_REACHED ();
+        argv[argc++] = token;
+    }
+
+    if (argc == 0) {
+        palloc_free_page (command);
+        return -1;
+    }
+
+    /*
+     * 문자열 + 정렬 여유 + argv 포인터들
+     * + NULL 포인터 + 가짜 반환 주소.
+     */
+    size_t stack_bytes = 7 + (argc + 2) * sizeof (uintptr_t);
+
+    for (int i = 0; i < argc; i++) {
+        stack_bytes += strlen (argv[i]) + 1;
+    }
+
+    if (stack_bytes > PGSIZE) {
+        palloc_free_page (command);
+        return -1;
+    }
+
+    /* 2. 사용자 프로그램의 초기 레지스터 상태를 준비한다. */
+    struct intr_frame if_;
+    memset (&if_, 0, sizeof if_);
+
+    if_.ds = if_.es = if_.ss = SEL_UDSEG;
+    if_.cs = SEL_UCSEG;
+    if_.eflags = FLAG_IF | FLAG_MBS;
+
+    process_cleanup ();
+
+    /* 전체 명령행이 아닌 프로그램 이름만 전달한다. */
+    if (!load (argv[0], &if_)) {
+        palloc_free_page (command);
+        return -1;
+    }
+
+    /* 3. 인자 문자열을 사용자 스택에 복사한다. */
+    for (int i = argc - 1; i >= 0; i--) {
+        size_t length = strlen (argv[i]) + 1;
+
+        if_.rsp -= length;
+        memcpy ((void *) if_.rsp, argv[i], length);
+
+        /* 사용자 스택에 들어간 문자열의 주소를 기록한다. */
+        user_argv[i] = if_.rsp;
+    }
+
+    /* 4. 스택을 8바이트 경계에 맞춘다. */
+    while (if_.rsp % 8 != 0) {
+        if_.rsp--;
+        *(uint8_t *) if_.rsp = 0;
+    }
+
+    /* 5. argv[argc] = NULL을 넣는다. */
+    uintptr_t zero = 0;
+
+    if_.rsp -= sizeof zero;
+    memcpy ((void *) if_.rsp, &zero, sizeof zero);
+
+    /* 6. 문자열 주소들을 넣어서 argv 배열을 만든다. */
+    for (int i = argc - 1; i >= 0; i--) {
+        if_.rsp -= sizeof (uintptr_t);
+        memcpy ((void *) if_.rsp,
+                &user_argv[i],
+                sizeof (uintptr_t));
+    }
+
+    /* 7. _start(argc, argv)에 전달할 레지스터를 설정한다. */
+    if_.R.rdi = argc;
+    if_.R.rsi = if_.rsp;
+
+    /* 8. 가짜 반환 주소를 넣는다. */
+    if_.rsp -= sizeof zero;
+    memcpy ((void *) if_.rsp, &zero, sizeof zero);
+
+    /* 문자열을 사용자 스택에 복사했으므로 원본은 해제한다. */
+    palloc_free_page (command);
+
+    /* 9. 준비한 상태로 사용자 프로그램을 실행한다. */
+    do_iret (&if_);
+    NOT_REACHED ();
+}
+
+/* argv[0..argc-1] 문자열들을 x86-64 호출 규약에 맞게 사용자 스택에 쌓고,
+ * main(argc, argv)의 인자가 되도록 rdi, rsi 레지스터를 채운다. */
+static void
+argument_stack (char **argv, int argc, struct intr_frame *if_) {
+	char *arg_addr[64];     /* 스택에 복사한 각 문자열의 사용자 주소 */
+	int i;
+
+	/* 1. 문자열 자체를 스택에 복사 (뒤의 인자부터, '\0' 포함) */
+	for (i = argc - 1; i >= 0; i--) {
+		size_t len = strlen (argv[i]) + 1;
+		if_->rsp -= len;
+		memcpy ((void *) if_->rsp, argv[i], len);
+		arg_addr[i] = (char *) if_->rsp;
+	}
+
+	/* 2. rsp를 8의 배수로 내린다 (word-align). 빈 칸은 0으로 채운다. */
+	while (if_->rsp % 8 != 0) {
+		if_->rsp--;
+		*(uint8_t *) if_->rsp = 0;
+	}
+
+	/* 3. argv[argc] = NULL (C 표준: argv 배열은 NULL로 끝난다) */
+	if_->rsp -= sizeof (char *);
+	*(char **) if_->rsp = NULL;
+
+	/* 4. argv[argc-1] ~ argv[0]: 문자열들의 주소를 쌓는다 */
+	for (i = argc - 1; i >= 0; i--) {
+		if_->rsp -= sizeof (char *);
+		*(char **) if_->rsp = arg_addr[i];
+	}
+
+	/* 5. main(argc, argv) 인자 전달: 1번째 인자 rdi, 2번째 인자 rsi */
+	if_->R.rdi = argc;
+	if_->R.rsi = if_->rsp;          /* 방금 쌓은 argv[0]의 위치 = argv 배열 시작 */
+
+	/* 6. 가짜 반환 주소 0. 보통 함수처럼 스택 맨 위에 반환 주소가 있는 모양을 맞춘다. */
+	if_->rsp -= sizeof (void *);
+	*(void **) if_->rsp = NULL;
 }
 
 
@@ -200,11 +329,34 @@ process_exec (void *f_name) {
  * This function will be implemented in problem 2-2.  For now, it
  * does nothing. */
 int
-process_wait (tid_t child_tid UNUSED) {
-	/* XXX: Hint) The pintos exit if process_wait (initd), we recommend you
-	 * XXX:       to add infinite loop here before
-	 * XXX:       implementing the process_wait. */
-	return -1;
+process_wait (tid_t child_tid) {
+	struct thread *curr = thread_current ();
+	struct thread *child = NULL;
+	struct list_elem *e;
+
+	/* 1. 내 자식 목록에서 child_tid를 가진 스레드를 찾는다. */
+	for (e = list_begin (&curr->children); e != list_end (&curr->children);
+			e = list_next (e)) {
+		struct thread *t = list_entry (e, struct thread, child_elem);
+		if (t->tid == child_tid) {
+			child = t;
+			break;
+		}
+	}
+	/* 내 자식이 아니거나, 이미 wait해서 목록에서 빠졌으면 바로 -1 */
+	if (child == NULL)
+		return -1;
+
+	/* 2. 자식이 끝날 때까지 잠든다. 자식이 process_exit에서 up 해 준다. */
+	sema_down (&child->wait_sema);
+
+	/* 3. 자식이 남긴 종료 코드를 읽고, 다시 wait하지 못하게 목록에서 뺀다. */
+	int status = child->exit_status;
+	list_remove (&child->child_elem);
+
+	/* 4. "다 읽었으니 이제 사라져도 돼"라고 자식에게 알린다. */
+	sema_up (&child->exit_sema);
+	return status;
 }
 
 /* Exit the process. This function is called by thread_exit (). */
@@ -216,7 +368,23 @@ process_exit (void) {
 	 * TODO: project2/process_termination.html).
 	 * TODO: We recommend you to implement process resource cleanup here. */
 
+	/* 사용자 프로세스(페이지 테이블이 있는 스레드)일 때만 종료 메시지를 찍는다.
+	 * 테스트는 정확히 "이름: exit(코드)" 한 줄을 기대한다. */
+	if (curr->pml4 != NULL)
+		printf ("%s: exit(%d)\n", curr->name, curr->exit_status);
+
 	process_cleanup ();
+
+	/* 내가 먼저 죽으면 내 자식들을 기다려 줄 부모가 없으니 풀어 준다. */
+	struct list_elem *e;
+	for (e = list_begin (&curr->children); e != list_end (&curr->children);
+			e = list_next (e))
+		sema_up (&list_entry (e, struct thread, child_elem)->exit_sema);
+
+	/* 기다리는 부모를 깨우고, 부모가 exit_status를 읽을 때까지 기다린다.
+	 * 이 기다림이 없으면 부모가 읽기 전에 내 struct thread가 해제될 수 있다. */
+	sema_up (&curr->wait_sema);
+	sema_down (&curr->exit_sema);
 }
 
 /* Free the current process's resources. */
