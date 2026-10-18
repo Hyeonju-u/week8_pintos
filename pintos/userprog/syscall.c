@@ -101,7 +101,7 @@ void syscall_handler(struct intr_frame *f)
 		int fd = (int)f->R.rdi;
 		const void *buffer = (const void *)f->R.rsi;
 		unsigned size = (unsigned)f->R.rdx;
-		if (readable_buffer(buffer, size) == 0)
+		if (!readable_buffer(buffer, size)) // readable_buffer 읽을수 없으면
 		{
 			thread_current()->exit_status = -1;
 			thread_exit();

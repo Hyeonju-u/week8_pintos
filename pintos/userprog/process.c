@@ -372,6 +372,7 @@ process_exit (void) {
 	 * 테스트는 정확히 "이름: exit(코드)" 한 줄을 기대한다. */
 	if (curr->pml4 != NULL)
 		printf ("%s: exit(%d)\n", curr->name, curr->exit_status);
+		palloc_free_page (curr->fd_table);
 
 	process_cleanup ();
 

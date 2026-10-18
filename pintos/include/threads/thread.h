@@ -113,6 +113,8 @@ struct thread {
 	struct list_elem child_elem;        /* 부모의 children 리스트에 들어갈 고리 */
 	struct semaphore wait_sema;         /* 자식이 죽으면 up → 기다리던 부모가 깨어남 */
 	struct semaphore exit_sema;         /* 부모가 종료 코드를 읽으면 up → 자식이 마저 사라짐 */
+	struct file **fd_table;
+	int next_fd;
 #endif
 #ifdef VM
 	/* Table for whole virtual memory owned by thread. */
