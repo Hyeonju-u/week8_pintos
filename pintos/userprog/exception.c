@@ -86,6 +86,8 @@ kill (struct intr_frame *f) {
 			printf ("%s: dying due to interrupt %#04llx (%s).\n",
 					thread_name (), f->vec_no, intr_name (f->vec_no));
 			intr_dump_frame (f);
+			/* 프로세스 죽이기전에 종료코드 안정해줘야하는데 안정해줌 종료 코드 추가 */
+			thread_current()->exit_status = -1;
 			thread_exit ();
 
 		case SEL_KCSEG:
