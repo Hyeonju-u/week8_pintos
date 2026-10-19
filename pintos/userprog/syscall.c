@@ -11,6 +11,7 @@
 #include "threads/vaddr.h"
 #include "threads/init.h"     /* ← 추가: power_off() */
 #include "lib/kernel/stdio.h" /* ← 추가: putbuf() */
+#include "filesys/filesys.h"
 
 void syscall_entry(void);
 void syscall_handler(struct intr_frame *);
@@ -78,6 +79,19 @@ readable_buffer(const void *buffer, size_t size)
 
 	return true;
 }
+static bool readlable_string(const char *str)
+{ 
+
+	for (;; str++)
+	{
+		if (!readable_buffer(str,1) )
+		return false;
+		if (*str =='\0')
+		return true;
+
+	}
+}
+
 
 void syscall_handler(struct intr_frame *f)
 {
@@ -101,8 +115,28 @@ void syscall_handler(struct intr_frame *f)
 		break;
 	}
         case SYS_EXEC:
-	{       // f->R.rax = ;
-		break;
+	{      
+		const char *file = (const char *)f->R.rdi;
+		/*문자열 검사*/
+		if (!readlable_string(file)){
+		thread_current()->exit_status = -1;
+		thread_exit();
+		}
+		/*process_exec가 유저 메모리 지우기전에 커널페이지로 복사*/
+		char *fn_copy = palloc_get_page (0);
+		if (fn_copy == NULL)
+		{
+		  thread_current()->exit_status = -1;
+		  thread_exit();	
+		}
+		/*받는곳 fn_copy 보내는 곳 file */
+	        strlcpy (fn_copy,file, PGSIZE);
+		/* 지금 프로세스를 새 프로그램으로 바꾸기*/
+		process_exec(fn_copy);
+                /* 프로그램 종료*/
+		thread_current()->exit_status = -1;
+		thread_exit();
+                break;
 	}
 	case SYS_WAIT:
 	{
@@ -111,19 +145,54 @@ void syscall_handler(struct intr_frame *f)
 	}
         case SYS_CREATE:
 	{
-            break;
+	    const char *file = (const char *)f->R.rdi;
+	    unsigned initial_size = (unsigned)f->R.rsi;
+	    if (!readlable_string(file))
+	    {
+		thread_current()->exit_status = -1;
+		thread_exit();
+	    }
+             f->R.rax = filesys_create(file, initial_size);
+	     break;
 	}
-	case SYS_REMOVE:
+	SYS_REMOVE:
 	{
+		const char *file = (const char *)f->R.rdi;
+		if (!readlable_string(file))
+	    {
+		thread_current()->exit_status = -1;
+		thread_exit();
+	    }
+		f->R.rax = filesys_remove(f->R.rdi);
+
 		break;
 	}
         case SYS_OPEN:
 	{
-          break;
+               const char *file = (const char *)f->R.rdi;
+	       if (!readlable_string(file))
+	    {
+		thread_current()->exit_status = -1;
+		thread_exit();
+	    }
+	    f->R.rax = filesys_open(f->R.rdi);
+
+               break;
+	}
+	case SYS_FILESIZE:
+	{
+                int fd = (int)f->R.rdi;
+		break;
+
+	}
+        case SYS_READ:
+	{       int fd = (int)f->R.rdi;
+		const void *buffer = (const void *)f->R.rsi;
+		unsigned size = (unsigned)f->R.rdx;
+		break;
 	}
 
-
-	case SYS_WRITE:
+        case SYS_WRITE:
 	{
 		/* write(fd, buffer, size): 지금은 fd 1(화면)만 지원한다. */
 		int fd = (int)f->R.rdi;
@@ -143,24 +212,27 @@ void syscall_handler(struct intr_frame *f)
 		else
 			f->R.rax = -1;
 		break;
+	}
+
+	case SYS_TELL:
+	{  
+	   int fd = (int)f->R.rdi;
+           break;
+	}	
 
 
-
-	case SYS_CLOSE:
+        case SYS_CLOSE:
 	{
-		power_off();
+		int fd = (int)f->R.rdi;
 		break;
 	}
 
 
-
-
-
-	}
-
 	default:
+	
 		/* 아직 만들지 않은 시스템 콜은 프로세스를 -1로 종료 */
 		thread_current()->exit_status = -1;
 		thread_exit();
+	
 	}
 }
