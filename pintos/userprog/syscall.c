@@ -12,7 +12,7 @@
 #include "threads/init.h"     /* ← 추가: power_off() */
 #include "lib/kernel/stdio.h" /* ← 추가: putbuf() */
 #include "filesys/filesys.h"
-
+#define FD_LIMIT (PGSIZE / sizeof (struct file *))   /* = 512 */
 void syscall_entry(void);
 void syscall_handler(struct intr_frame *);
 
@@ -184,13 +184,14 @@ void syscall_handler(struct intr_frame *f)
 		f->R.rax = -1;
 		break;
 	    }
-        curr->fd_table[curr->next_fd]= opened;
+             curr->fd_table[curr->next_fd]= opened;
 
-	f->R.rax =curr->next_fd;
-	curr->next_fd++;
+	     f->R.rax =curr->next_fd;
+	     curr->next_fd++;
 	
-            break;
+             break;
 	}
+	/*열려있는 파일의 크기가 몇바이트인지 반환*/
 	case SYS_FILESIZE:
 	{
                 int fd = (int)f->R.rdi;
@@ -232,10 +233,22 @@ void syscall_handler(struct intr_frame *f)
            break;
 	}	
 
-
+         /*파일식별자 fd 닫음 프로세스 나가거나 종료하는것은 묵시적으로 그 프로세스의 열려있는 파일 식별자들 닫음*/
         case SYS_CLOSE:
-	{
+        {
+		struct thread *curr = thread_current ();
 		int fd = (int)f->R.rdi;
+		/*fd가 너무 작거나 너무 크면 멈추기*/
+		if(fd < 2 || fd >= FD_LIMIT )
+		{break;}
+
+                struct file *file = curr->fd_table[fd];
+		if(!file)
+		{break;}
+
+		file_close (file);//파일 닫기
+		curr->fd_table[fd] = NULL;//빈칸으로 채우기
+
 		break;
 	}
 
