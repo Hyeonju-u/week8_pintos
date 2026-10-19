@@ -95,6 +95,34 @@ void syscall_handler(struct intr_frame *f)
 		thread_exit();
 		break;
 
+	case SYS_FORK:
+	{
+	        f->R.rax = process_fork((const char *)f->R.rdi, f);
+		break;
+	}
+        case SYS_EXEC:
+	{       // f->R.rax = ;
+		break;
+	}
+	case SYS_WAIT:
+	{
+		f->R.rax = process_wait(f->R.rdi);
+		break;
+	}
+        case SYS_CREATE:
+	{
+            break;
+	}
+	case SYS_REMOVE:
+	{
+		break;
+	}
+        case SYS_OPEN:
+	{
+          break;
+	}
+
+
 	case SYS_WRITE:
 	{
 		/* write(fd, buffer, size): 지금은 fd 1(화면)만 지원한다. */
@@ -115,6 +143,19 @@ void syscall_handler(struct intr_frame *f)
 		else
 			f->R.rax = -1;
 		break;
+
+
+
+	case SYS_CLOSE:
+	{
+		power_off();
+		break;
+	}
+
+
+
+
+
 	}
 
 	default:
