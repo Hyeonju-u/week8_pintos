@@ -12,6 +12,10 @@
 #include "threads/init.h"     /* ← 추가: power_off() */
 #include "lib/kernel/stdio.h" /* ← 추가: putbuf() */
 #include "filesys/filesys.h"
+#include "filesys/file.h"
+#include "threads/palloc.h"
+#include "userprog/process.h"
+#include "lib/string.h"
 #define FD_LIMIT (PGSIZE / sizeof (struct file *))   /* = 512 */
 void syscall_entry(void);
 void syscall_handler(struct intr_frame *);
@@ -79,6 +83,7 @@ readable_buffer(const void *buffer, size_t size)
 
 	return true;
 }
+/*문자열 검사 함수 */
 static bool readable_string(const char *str)
 { 
 
@@ -91,6 +96,18 @@ static bool readable_string(const char *str)
 
 	}
 }
+/*fd 번호를 받아서, 그 번호에 해당하는 파일을 돌려주는 함수*/
+static struct file *
+get_file(int fd)
+{
+	if(fd < 2 || fd >= FD_LIMIT )
+	{
+		return NULL;
+	}
+        return thread_current()->fd_table[fd];
+}
+
+
 
 
 void syscall_handler(struct intr_frame *f)
@@ -193,8 +210,18 @@ void syscall_handler(struct intr_frame *f)
 	}
 	/*열려있는 파일의 크기가 몇바이트인지 반환*/
 	case SYS_FILESIZE:
-	{
+	{     
                 int fd = (int)f->R.rdi;
+		struct file *fds;
+		fds = get_file(fd);
+		if (!fds)
+		{
+			f->R.rax = -1;
+		        break;
+		}
+		f->R.rax = file_length(fds);
+
+		
 		break;
 
 	}
