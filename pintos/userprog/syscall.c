@@ -79,7 +79,7 @@ readable_buffer(const void *buffer, size_t size)
 
 	return true;
 }
-static bool readlable_string(const char *str)
+static bool readable_string(const char *str)
 { 
 
 	for (;; str++)
@@ -118,7 +118,7 @@ void syscall_handler(struct intr_frame *f)
 	{      
 		const char *file = (const char *)f->R.rdi;
 		/*문자열 검사*/
-		if (!readlable_string(file)){
+		if (!readable_string(file)){
 		thread_current()->exit_status = -1;
 		thread_exit();
 		}
@@ -147,7 +147,7 @@ void syscall_handler(struct intr_frame *f)
 	{
 	    const char *file = (const char *)f->R.rdi;
 	    unsigned initial_size = (unsigned)f->R.rsi;
-	    if (!readlable_string(file))
+	    if (!readable_string(file))
 	    {
 		thread_current()->exit_status = -1;
 		thread_exit();
@@ -155,29 +155,41 @@ void syscall_handler(struct intr_frame *f)
              f->R.rax = filesys_create(file, initial_size);
 	     break;
 	}
-	SYS_REMOVE:
+	case SYS_REMOVE:
 	{
 		const char *file = (const char *)f->R.rdi;
-		if (!readlable_string(file))
+		if (!readable_string(file))
 	    {
 		thread_current()->exit_status = -1;
 		thread_exit();
 	    }
-		f->R.rax = filesys_remove(f->R.rdi);
+		f->R.rax = filesys_remove(file);
 
 		break;
 	}
         case SYS_OPEN:
 	{
+	       
                const char *file = (const char *)f->R.rdi;
-	       if (!readlable_string(file))
+	       if (!readable_string(file))
 	    {
 		thread_current()->exit_status = -1;
 		thread_exit();
 	    }
-	    f->R.rax = filesys_open(f->R.rdi);
+	    //f->R.rax = filesys_open(file);
+	    struct thread *curr = thread_current ();
+	    struct file *opened = filesys_open (file);
+	    if (!opened)
+	    {
+		f->R.rax = -1;
+		break;
+	    }
+        curr->fd_table[curr->next_fd]= opened;
 
-               break;
+	f->R.rax =curr->next_fd;
+	curr->next_fd++;
+	
+            break;
 	}
 	case SYS_FILESIZE:
 	{
