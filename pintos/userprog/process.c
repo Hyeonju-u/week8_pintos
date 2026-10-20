@@ -85,10 +85,27 @@ tid_t
 process_fork (const char *name, struct intr_frame *if_) {
 	/* Clone current thread to new thread.*/
         /*자식이 부모와 같은 곳에서 시작하기 위해 레지스터 복사*/
+	struct thread *child = NULL;
+	struct list_elem *e;
+	struct thread *parent = thread_current();
 	memcpy (&thread_current()->parent_if,if_, sizeof (struct intr_frame));
+        tid_t tid =thread_create (name,PRI_DEFAULT, __do_fork, thread_current ());
+        if(tid == TID_ERROR )
+	{return TID_ERROR;}
+	for (e = list_begin (&parent->children); e != list_end (&parent ->children);
+			e = list_next (e)) {
+		struct thread *t = list_entry (e, struct thread, child_elem);
+		if (t->tid == tid) {
+			child = t;
+			break;
+		}
+	}
+	if (child == NULL)
+		return -1;
+	/*부모가 찾은 자식의 세마포어로 기다림*/
+	sema_down (&child->fork_sema);
 
-	return thread_create (name,
-			PRI_DEFAULT, __do_fork, thread_current ());
+	return tid;
 }
 
 #ifndef VM
@@ -96,28 +113,42 @@ process_fork (const char *name, struct intr_frame *if_) {
  * pml4_for_each. This is only for the project 2. */
 static bool
 duplicate_pte (uint64_t *pte, void *va, void *aux) {
+	
 	struct thread *current = thread_current ();
 	struct thread *parent = (struct thread *) aux;
 	void *parent_page;
 	void *newpage;
 	bool writable;
+       /* 1. TODO: If the parent_page is kernel page, then return immediately.부모 페이지가 커널페이지면 바로 종료  */
+       if (is_kernel_vaddr(va) )
+       {
+	return true;
+       }
+       /* 2. Resolve VA from the parent's page map level 4. */
+        //부모의 pm14에서 va에 해당하는 실제 페이지를 찾아라
+       parent_page = pml4_get_page (parent->pml4, va);
 
-	/* 1. TODO: If the parent_page is kernel page, then return immediately. */
-
-	/* 2. Resolve VA from the parent's page map level 4. */
-	parent_page = pml4_get_page (parent->pml4, va);
-
-	/* 3. TODO: Allocate new PAL_USER page for the child and set result to
+	/* 3. TODO: Allocate new PAL_USER page for the child and set result to 자식 PAL_USER페이지를 새로 할당후 그 결과를 NEWPAGE에 넣어라 palloc_get_page(PAL_USER)
 	 *    TODO: NEWPAGE. */
+        newpage = palloc_get_page (PAL_USER);
+	if (newpage == NULL)
+	{
+		return false;
+	}
+	
 
 	/* 4. TODO: Duplicate parent's page to the new page and
 	 *    TODO: check whether parent's page is writable or not (set WRITABLE
-	 *    TODO: according to the result). */
-
-	/* 5. Add new page to child's page table at address VA with WRITABLE
+	 *    TODO: according to the result).부모 페이지를 새 페이지에 복사하고 부모 페이지가 쓸 수 있는지 확인해서 WRITABLE에다가 넣어라  *///memcpy(newpage, parent_page, PGSIZE)writable 여부는 duplicate_pte의 첫 번째 인자인 부모의 pte로 확인해. is_writable(pte)
+        memcpy(newpage, parent_page, PGSIZE);
+        writable = is_writable(pte);
+	
+	/* 5. Add new page to child's page table at address VA with WRITABLE자식 페이지 테이블의 va 주소에 새 페이지를 writable 권한으로 매핑.
 	 *    permission. */
 	if (!pml4_set_page (current->pml4, va, newpage, writable)) {
-		/* 6. TODO: if fail to insert page, do error handling. */
+		/* 6. TODO: if fail to insert page, do error handling. *///페이지 삽입에 실패하면 에러 처리를 해라.이미 할당해둔 newpage를 palloc_free_page(newpage)로 해제하고 false를 리턴
+		palloc_free_page (newpage);
+                return false;
 	}
 	return true;
 }
@@ -132,13 +163,15 @@ __do_fork (void *aux) {
 	struct intr_frame if_;//자식 상자
 	struct thread *parent = (struct thread *) aux;
 	struct thread *current = thread_current ();
+	
 	/* TODO: somehow pass the parent_if. (i.e. process_fork()'s if_) 부모의 레지스터 상태(if_)← 이걸 못 보냄*/
 	struct intr_frame *parent_if = &parent->parent_if;
 	bool succ = true;
 
-	/* 1. Read the cpu context to local stack. */
+	/* 레지스터 상태를 전부 가져와서 부모와 똑같이 실행 */
 	memcpy (&if_,parent_if, sizeof (struct intr_frame));
-
+	/* 자식 반환값 0 */
+        if_.R.rax = 0;
 	/* 2. Duplicate PT */
 	current->pml4 = pml4_create();
 	if (current->pml4 == NULL)
@@ -163,9 +196,11 @@ __do_fork (void *aux) {
 	process_init ();
         
 	/* Finally, switch to the newly created process. */
-	if (succ)
-		do_iret (&if_);
+	if (succ){/*성공하면 부모한테 신호 보내기*/
+		sema_up(&current->fork_sema);
+		do_iret (&if_);}
 error:
+        sema_up (&current->fork_sema);
 	thread_exit ();
 }
 
@@ -377,7 +412,7 @@ process_exit (void) {
 		printf ("%s: exit(%d)\n", curr->name, curr->exit_status);
 		palloc_free_page (curr->fd_table);
 
-	process_cleanup ();//// 지금 프로세스의 유저 메모리를 전부 지움
+	process_cleanup ();// 지금 프로세스의 유저 메모리를 전부 지움
 
 	/* 내가 먼저 죽으면 내 자식들을 기다려 줄 부모가 없으니 풀어 준다. */
 	struct list_elem *e;
