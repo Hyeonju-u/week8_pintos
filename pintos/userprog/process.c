@@ -84,18 +84,26 @@ initd (void *f_name) {
 tid_t
 process_fork (const char *name, struct intr_frame *if_) {
 	/* Clone current thread to new thread.*/
-        /*자식이 부모와 같은 곳에서 시작하기 위해 레지스터 복사*/
+        
 	struct thread *child = NULL;
 	struct list_elem *e;
 	struct thread *parent = thread_current();
+	/*자식이 부모와 같은 곳에서 시작하기 위해 레지스터 복사*/
 	memcpy (&thread_current()->parent_if,if_, sizeof (struct intr_frame));
+	/*자식 스레드 */
         tid_t tid =thread_create (name,PRI_DEFAULT, __do_fork, thread_current ());
+
         if(tid == TID_ERROR )
-	{return TID_ERROR;}
+	{
+		return TID_ERROR;
+	}
+
+	 /*방금 만든 자식의 struct thread를 찾는 반복문*/
 	for (e = list_begin (&parent->children); e != list_end (&parent ->children);
-			e = list_next (e)) {
+		e = list_next (e)) {
 		struct thread *t = list_entry (e, struct thread, child_elem);
-		if (t->tid == tid) {
+		if (t->tid == tid)
+		{
 			child = t;
 			break;
 		}
@@ -135,8 +143,6 @@ duplicate_pte (uint64_t *pte, void *va, void *aux) {
 	{
 		return false;
 	}
-	
-
 	/* 4. TODO: Duplicate parent's page to the new page and
 	 *    TODO: check whether parent's page is writable or not (set WRITABLE
 	 *    TODO: according to the result).부모 페이지를 새 페이지에 복사하고 부모 페이지가 쓸 수 있는지 확인해서 WRITABLE에다가 넣어라  *///memcpy(newpage, parent_page, PGSIZE)writable 여부는 duplicate_pte의 첫 번째 인자인 부모의 pte로 확인해. is_writable(pte)
@@ -163,7 +169,6 @@ __do_fork (void *aux) {
 	struct intr_frame if_;//자식 상자
 	struct thread *parent = (struct thread *) aux;
 	struct thread *current = thread_current ();
-	
 	/* TODO: somehow pass the parent_if. (i.e. process_fork()'s if_) 부모의 레지스터 상태(if_)← 이걸 못 보냄*/
 	struct intr_frame *parent_if = &parent->parent_if;
 	bool succ = true;
@@ -186,13 +191,30 @@ __do_fork (void *aux) {
 	if (!pml4_for_each (parent->pml4, duplicate_pte, parent))
 		goto error;
 #endif
-
+	/* 3. 파일 디스크립터 복제 (두 번째 주석 부분) */
+	/* 4. 부모를 깨우고 유저 모드로 진입 */
+	
 	/* TODO: Your code goes here.
 	 * TODO: Hint) To duplicate the file object, use `file_duplicate`
 	 * TODO:       in include/filesys/file.h. Note that parent should not return
 	 * TODO:       from the fork() until this function successfully duplicates
 	 * TODO:       the resources of parent.*/
-        
+        for (int i = 2;i < parent->next_fd; i++)
+	{
+		if(!parent->fd_table[i])
+		{
+                  continue;
+		}
+	current->fd_table[i] = file_duplicate(parent->fd_table[i]);
+
+	if (!current->fd_table[i])
+	{
+		goto error;
+	}
+        }
+	current->next_fd = parent->next_fd;
+
+
 	process_init ();
         
 	/* Finally, switch to the newly created process. */
@@ -588,8 +610,8 @@ load (const char *file_name, struct intr_frame *if_) {
 			case PT_LOAD:
 				if (validate_segment (&phdr, file)) {
 				bool writable = (phdr.p_flags & PF_W) != 0;
-					uint64_t file_page = phdr.p_offset & ~PGMASK;
-					uint64_t mem_page = phdr.p_vaddr & ~PGMASK;
+			uint64_t file_page = phdr.p_offset & ~PGMASK;
+			uint64_t mem_page = phdr.p_vaddr & ~PGMASK;
 					uint64_t page_offset = phdr.p_vaddr & PGMASK;
 					uint32_t read_bytes, zero_bytes;
 					if (phdr.p_filesz > 0) {
