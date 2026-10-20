@@ -102,6 +102,7 @@ struct thread {
 
 	/* Shared between thread.c and synch.c. */
 	struct list_elem elem;              /* List element. */
+	struct file *current_file; /*실행 중인 파일*/
 
 #ifdef USERPROG
 	/* Owned by userprog/process.c. */

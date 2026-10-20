@@ -431,10 +431,25 @@ process_exit (void) {
 	/* 사용자 프로세스(페이지 테이블이 있는 스레드)일 때만 종료 메시지를 찍는다.
 	 * 테스트는 정확히 "이름: exit(코드)" 한 줄을 기대한다. */
 	if (curr->pml4 != NULL)
-		printf ("%s: exit(%d)\n", curr->name, curr->exit_status);
-		palloc_free_page (curr->fd_table);
+		{printf ("%s: exit(%d)\n", curr->name, curr->exit_status);}
+		
 
-	process_cleanup ();// 지금 프로세스의 유저 메모리를 전부 지움
+		for (int i = 2;i < curr->next_fd; i++){
+	
+		if(!curr->fd_table[i])
+		{
+                  continue;
+		}
+	    file_close(curr->fd_table[i]);
+	}
+      palloc_free_page (curr->fd_table);
+
+    if (curr->current_file) //현재 파일에 파일이 있으면
+    {
+       file_close (curr->current_file);
+       curr->current_file = NULL;
+    }
+    process_cleanup ();// 지금 프로세스의 유저 메모리를 전부 지움
 
 	/* 내가 먼저 죽으면 내 자식들을 기다려 줄 부모가 없으니 풀어 준다. */
 	struct list_elem *e;
@@ -549,19 +564,21 @@ static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
  * Stores the executable's entry point into *RIP
  * and its initial stack pointer into *RSP.
  * Returns true if successful, false otherwise. */
+/*디스크에 존재하는 ELF 형식의 사용자 프로그램을 읽어와 현재 프로세스의 가상 메모리에 적재하고 실행할 준비를 하는 함수*/
 static bool
 load (const char *file_name, struct intr_frame *if_) {
 	struct thread *t = thread_current ();
 	struct ELF ehdr;
 	struct file *file = NULL;
-	off_t file_ofs;
+	off_t file_ofs;//ELF 파일내 해당 세그먼트 시작되는 바이트 오프셋 저장하는변수
 	bool success = false;
 	int i;
-
+//pml4 페이지 테이블 최상위 테이블 주소 가상메모리 주소록
 	/* Allocate and activate page directory. */
 	t->pml4 = pml4_create ();
 	if (t->pml4 == NULL)
 		goto done;
+    /* CPU가 새로운 프로세스의 메모리 공간을 바라보도록 하드웨어 설정함수. */
 	process_activate (thread_current ());
 
 	/* Open executable file. */
@@ -570,7 +587,11 @@ load (const char *file_name, struct intr_frame *if_) {
 		printf ("load: %s: open failed\n", file_name);
 		goto done;
 	}
+    file_deny_write(file);//파일 쓰기 금지
+    t->current_file = file; 
+    
 
+     /*memcmp 두개 메모리 블록 저장된 바이트 단위로 직접 비교함*/
 	/* Read and verify executable header. */
 	if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
 			|| memcmp (ehdr.e_ident, "\177ELF\2\1\1", 7)
@@ -583,10 +604,10 @@ load (const char *file_name, struct intr_frame *if_) {
 		goto done;
 	}
 
-	/* Read program headers. */
+	/* Read program headers.파일 전체 프로그램 헤더 개수만큼 반복문 돌면서 Phdr을 하나씩 읽어옴 */
 	file_ofs = ehdr.e_phoff;
 	for (i = 0; i < ehdr.e_phnum; i++) {
-		struct Phdr phdr;
+		struct Phdr phdr;/*ELF 실행 파일 안에 기록되어있는 프로그램 헤더 정보를 담기위한 구조체 변수*/
 
 		if (file_ofs < 0 || file_ofs > file_length (file))
 			goto done;
@@ -608,6 +629,7 @@ load (const char *file_name, struct intr_frame *if_) {
 			case PT_SHLIB:
 				goto done;
 			case PT_LOAD:
+			/*세그먼트가 유지 프로세스의 정상적인 가상메모리 범위에 들어오는지*/
 				if (validate_segment (&phdr, file)) {
 				bool writable = (phdr.p_flags & PF_W) != 0;
 			uint64_t file_page = phdr.p_offset & ~PGMASK;
@@ -625,7 +647,7 @@ load (const char *file_name, struct intr_frame *if_) {
 						 * Don't read anything from disk. */
 						read_bytes = 0;
 						zero_bytes = ROUND_UP (page_offset + phdr.p_memsz, PGSIZE);
-					}
+					}/*검증통과한 세그먼트를 가상메모리에 올리는 핵심작업*/
 					if (!load_segment (file, file_page, (void *) mem_page,
 								read_bytes, zero_bytes, writable))
 						goto done;
@@ -645,12 +667,20 @@ load (const char *file_name, struct intr_frame *if_) {
 
 	/* TODO: Your code goes here.
 	 * TODO: Implement argument passing (see project2/argument_passing.html). */
+	   
+
 
 	success = true;
 
 done:
 	/* We arrive here whether the load is successful or not. */
-	file_close (file);
+	if (!success)//실패했으면 파일 닫지 말기
+	{
+     file_close (file);
+     t->current_file = NULL;//닫힌 파일 주소 안남게 0으로 초기화
+
+	}
+	
 	return success;
 }
 
