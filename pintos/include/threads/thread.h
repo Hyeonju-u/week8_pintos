@@ -115,6 +115,8 @@ struct thread {
 	struct semaphore exit_sema;         /* 부모가 종료 코드를 읽으면 up → 자식이 마저 사라짐 */
 	struct file **fd_table;
 	int next_fd;
+	struct intr_frame parent_if;/* 부모의 레지스터 상태를 담을 칸 */
+
 #endif
 #ifdef VM
 	/* Table for whole virtual memory owned by thread. */

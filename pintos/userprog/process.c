@@ -82,8 +82,11 @@ initd (void *f_name) {
 /* Clones the current process as `name`. Returns the new process's thread id, or
  * TID_ERROR if the thread cannot be created. */
 tid_t
-process_fork (const char *name, struct intr_frame *if_ UNUSED) {
+process_fork (const char *name, struct intr_frame *if_) {
 	/* Clone current thread to new thread.*/
+        /*자식이 부모와 같은 곳에서 시작하기 위해 레지스터 복사*/
+	memcpy (&thread_current()->parent_if,if_, sizeof (struct intr_frame));
+
 	return thread_create (name,
 			PRI_DEFAULT, __do_fork, thread_current ());
 }
@@ -126,15 +129,15 @@ duplicate_pte (uint64_t *pte, void *va, void *aux) {
  *       this function. */
 static void
 __do_fork (void *aux) {
-	struct intr_frame if_;
+	struct intr_frame if_;//자식 상자
 	struct thread *parent = (struct thread *) aux;
 	struct thread *current = thread_current ();
-	/* TODO: somehow pass the parent_if. (i.e. process_fork()'s if_) */
-	struct intr_frame *parent_if;
+	/* TODO: somehow pass the parent_if. (i.e. process_fork()'s if_) 부모의 레지스터 상태(if_)← 이걸 못 보냄*/
+	struct intr_frame *parent_if = &parent->parent_if;
 	bool succ = true;
 
 	/* 1. Read the cpu context to local stack. */
-	memcpy (&if_, parent_if, sizeof (struct intr_frame));
+	memcpy (&if_,parent_if, sizeof (struct intr_frame));
 
 	/* 2. Duplicate PT */
 	current->pml4 = pml4_create();
@@ -156,9 +159,9 @@ __do_fork (void *aux) {
 	 * TODO:       in include/filesys/file.h. Note that parent should not return
 	 * TODO:       from the fork() until this function successfully duplicates
 	 * TODO:       the resources of parent.*/
-
+        
 	process_init ();
-
+        
 	/* Finally, switch to the newly created process. */
 	if (succ)
 		do_iret (&if_);
@@ -374,7 +377,7 @@ process_exit (void) {
 		printf ("%s: exit(%d)\n", curr->name, curr->exit_status);
 		palloc_free_page (curr->fd_table);
 
-	process_cleanup ();
+	process_cleanup ();//// 지금 프로세스의 유저 메모리를 전부 지움
 
 	/* 내가 먼저 죽으면 내 자식들을 기다려 줄 부모가 없으니 풀어 준다. */
 	struct list_elem *e;
@@ -549,7 +552,7 @@ load (const char *file_name, struct intr_frame *if_) {
 				goto done;
 			case PT_LOAD:
 				if (validate_segment (&phdr, file)) {
-					bool writable = (phdr.p_flags & PF_W) != 0;
+				bool writable = (phdr.p_flags & PF_W) != 0;
 					uint64_t file_page = phdr.p_offset & ~PGMASK;
 					uint64_t mem_page = phdr.p_vaddr & ~PGMASK;
 					uint64_t page_offset = phdr.p_vaddr & PGMASK;
