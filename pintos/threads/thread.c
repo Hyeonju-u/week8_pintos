@@ -133,6 +133,7 @@ thread_start (void) {
 
 	/* Wait for the idle thread to initialize idle_thread. */
 	sema_down (&idle_started);
+	
 }
 
 /* Called by the timer interrupt handler at each timer tick.
@@ -482,6 +483,7 @@ init_thread (struct thread *t, const char *name, int priority) {
 	t->next_fd = 2;
 	sema_init (&t->wait_sema, 0);
 	sema_init (&t->exit_sema, 0);
+	sema_init (&t->fork_sema, 0);//추가
 #endif
 	t->magic = THREAD_MAGIC;
 }

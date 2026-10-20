@@ -113,6 +113,7 @@ struct thread {
 	struct list_elem child_elem;        /* 부모의 children 리스트에 들어갈 고리 */
 	struct semaphore wait_sema;         /* 자식이 죽으면 up → 기다리던 부모가 깨어남 */
 	struct semaphore exit_sema;         /* 부모가 종료 코드를 읽으면 up → 자식이 마저 사라짐 */
+	struct semaphore fork_sema;/* 자식이 복사끝날때까지 부모 기다림 */
 	struct file **fd_table;
 	int next_fd;
 	struct intr_frame parent_if;/* 부모의 레지스터 상태를 담을 칸 */
