@@ -262,6 +262,7 @@ void syscall_handler(struct intr_frame *f)
 		int fd = (int)f->R.rdi;
 		const void *buffer = (const void *)f->R.rsi;
 		unsigned size = (unsigned)f->R.rdx;
+		struct file *fd_w;
 		if (!readable_buffer(buffer, size)) // readable_buffer 읽을수 없으면
 		{
 			thread_current()->exit_status = -1;
@@ -273,14 +274,43 @@ void syscall_handler(struct intr_frame *f)
 			putbuf(buffer, size);
 			f->R.rax = size; /* 반환값은 rax에 넣는다: 쓴 바이트 수 */
 		}
-		else
+		else {
+		    fd_w = get_file(fd);
+		    if (!fd_w)
+		{
 			f->R.rax = -1;
+		        break;
+		}
+                f->R.rax = file_write (fd_w, buffer, size);
+		
+	        }
+		
 		break;
 	}
+        case SYS_SEEK:
+	{  
+	   int fd = (int)f->R.rdi;
+	   unsigned position = (unsigned)f->R.rsi;
+	   struct file *fd_seek;
+	   fd_seek = get_file(fd);
+           if(!fd_seek)
+               {break;}
+	   file_seek(fd_seek,position);
+	   break;
+	}	
+
 
 	case SYS_TELL:
 	{  
 	   int fd = (int)f->R.rdi;
+	   struct file *fd_tell;
+	   fd_tell = get_file(fd);
+	   if (!fd_tell)
+		{
+			f->R.rax = -1;
+		        break;
+		}
+	        f->R.rax =file_tell(fd_tell);
            break;
 	}	
 
