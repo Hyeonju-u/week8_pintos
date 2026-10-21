@@ -102,7 +102,7 @@ struct thread {
 
 	/* Shared between thread.c and synch.c. */
 	struct list_elem elem;              /* List element. */
-	struct file *current_file; /*실행 중인 파일*/
+	struct file *current_file; /*rox 실행 중인 파일*/
 
 #ifdef USERPROG
 	/* Owned by userprog/process.c. */
@@ -115,8 +115,8 @@ struct thread {
 	struct semaphore wait_sema;         /* 자식이 죽으면 up → 기다리던 부모가 깨어남 */
 	struct semaphore exit_sema;         /* 부모가 종료 코드를 읽으면 up → 자식이 마저 사라짐 */
 	struct semaphore fork_sema;/* 자식이 복사끝날때까지 부모 기다림 */
-	struct file **fd_table;
-	int next_fd;
+	struct file **fd_table;/*열린 프로그램 주소*/
+	int next_fd;/*다음 open 줄번호*/
 	struct intr_frame parent_if;/* 부모의 레지스터 상태를 담을 칸 */
 
 #endif

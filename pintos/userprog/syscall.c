@@ -19,7 +19,7 @@
 /* Predefined file handles. */
 #define STDIN_FILENO 0
 #define STDOUT_FILENO 1
-#define FD_LIMIT (PGSIZE / sizeof (struct file *))   /* = 512 */
+#define FD_LIMIT (PGSIZE / sizeof (struct file *))   /* =테이블 최대 담을 수 있는 칸수 512 */
 void syscall_entry(void);
 void syscall_handler(struct intr_frame *);
 uint8_t input_getc (void);
@@ -132,6 +132,7 @@ void syscall_handler(struct intr_frame *f)
 	        f->R.rax = process_fork((const char *)f->R.rdi, f);
 		break;
 	}
+	/*프로그램 바꾸기*/
         case SYS_EXEC:
 	{      
 		const char *file = (const char *)f->R.rdi;
@@ -161,6 +162,7 @@ void syscall_handler(struct intr_frame *f)
 		f->R.rax = process_wait(f->R.rdi);
 		break;
 	}
+
         case SYS_CREATE:
 	{
 	    const char *file = (const char *)f->R.rdi;
@@ -173,8 +175,9 @@ void syscall_handler(struct intr_frame *f)
              f->R.rax = filesys_create(file, initial_size);
 	     break;
 	}
+	/*문자열 검사 후 파일 삭제*/ 
 	case SYS_REMOVE:
-	{/*문자열 검사 후 파일 삭제*/ 
+	{
 		const char *file = (const char *)f->R.rdi;
 		if (!readable_string(file))
 	    {
@@ -185,9 +188,9 @@ void syscall_handler(struct intr_frame *f)
 
 		break;
 	}
+	/* 파일 열기*/
         case SYS_OPEN:
-	{/* 파일 열기에 실패했으면 (없는 파일, 빈 이름 등)
-	     * 유저에게 -1을 돌려주고 끝낸다. */
+	{
 	       
                const char *file = (const char *)f->R.rdi;
 	       if (!readable_string(file))
@@ -232,6 +235,7 @@ void syscall_handler(struct intr_frame *f)
 		break;
 
 	}
+	/*파일 읽기*/
         case SYS_READ:
 	{       int fd = (int)f->R.rdi;
 		void *buffer = (void *)f->R.rsi;
@@ -251,16 +255,18 @@ void syscall_handler(struct intr_frame *f)
 	        f->R.rax = size;
 		 break;
                 }
+                /*파일 찾기*/
 		fd_r = get_file(fd);
 		if (!fd_r)
 		{
 			f->R.rax = -1;
 		        break;
 		}
+		/*파일 읽기*/
 		f->R.rax = file_read (fd_r, buffer, size);
 		break;
 	}
-
+        /*파일 쓰기*/
          case SYS_WRITE:
 	{
 		/* write(fd, buffer, size): 지금은 fd 1(화면)만 지원한다. */
@@ -275,11 +281,11 @@ void syscall_handler(struct intr_frame *f)
 		}
 
 		if (fd == 1)
-		{
+		{       /*버퍼를 사이즈 바이트 만큼 콘솔에 출력*/
 			putbuf(buffer, size);
-			f->R.rax = size; /* 반환값은 rax에 넣는다: 쓴 바이트 수 */
+			f->R.rax = size; 
 		}
-		else {
+		else {/*파일 찾기*/
 		    fd_w = get_file(fd);
 		    if (!fd_w)
 		{
@@ -287,11 +293,11 @@ void syscall_handler(struct intr_frame *f)
 		        break;
 		}
                 f->R.rax = file_write (fd_w, buffer, size);
-		
+		/*파일 쓰기*/
 	        }
 		
 		break;
-	}
+	}/*syscall 번호(rax)를 보고 해당 case로 분기*/
         case SYS_SEEK:
 	{  
 	   int fd = (int)f->R.rdi;
@@ -300,11 +306,12 @@ void syscall_handler(struct intr_frame *f)
 	   fd_seek = get_file(fd);
            if(!fd_seek)
                {break;}
+	   /*fd_seek 파일의 pos를 position으로 바꿔라”*/
 	   file_seek(fd_seek,position);
 	   break;
 	}	
 
-
+        /*파일 가져와서 지금 몇번째 바이트 일고 쓰는지 위치 알려줌*/
 	case SYS_TELL:
 	{  
 	   int fd = (int)f->R.rdi;

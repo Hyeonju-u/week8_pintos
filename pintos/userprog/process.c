@@ -175,14 +175,15 @@ __do_fork (void *aux) {
 	struct thread *parent = (struct thread *) aux;
 	struct thread *current = thread_current ();
 	/* TODO: somehow pass the parent_if. (i.e. process_fork()'s if_) 부모의 레지스터 상태(if_)← 이걸 못 보냄*/
+	/*부모에 저장해둔 fork 순간의 레지스터 상태*/
 	struct intr_frame *parent_if = &parent->parent_if;
 	bool succ = true;
 
 	/* 레지스터 상태를 전부 가져와서 부모와 똑같이 실행 */
 	memcpy (&if_,parent_if, sizeof (struct intr_frame));
-	/* 자식 반환값 0 */
+	/* 자식 쪽에서 반환 하는 fork()값 0 */
         if_.R.rax = 0;
-	/* 2. Duplicate PT */
+	/* 2. Duplicate PT 자식 빈 페이지 테이블 생성*/
 	current->pml4 = pml4_create();
 	if (current->pml4 == NULL)
 		goto error;
@@ -196,21 +197,21 @@ __do_fork (void *aux) {
 	if (!pml4_for_each (parent->pml4, duplicate_pte, parent))
 		goto error;
 #endif
-	/* 3. 파일 디스크립터 복제 (두 번째 주석 부분) */
-	/* 4. 부모를 깨우고 유저 모드로 진입 */
+	
 	
 	/* TODO: Your code goes here.
 	 * TODO: Hint) To duplicate the file object, use `file_duplicate`
 	 * TODO:       in include/filesys/file.h. Note that parent should not return
 	 * TODO:       from the fork() until this function successfully duplicates
 	 * TODO:       the resources of parent.*/
+	/*부모 파일을 자식 같은 번호 칸에 복제본으로 넣기*/
 	 current->next_fd = parent->next_fd;
         for (int i = 2;i < parent->next_fd; i++)
 	{
-		if(!parent->fd_table[i])
-		{
-                continue;
-		}
+		/*NULL이면 건너뛰기 */
+		if(!parent->fd_table[i]){
+			continue;}
+    /*부모 테이블 파일 자식테이블로 대입*/
 	current->fd_table[i] = file_duplicate(parent->fd_table[i]);
    
 	if (!current->fd_table[i])
@@ -226,10 +227,10 @@ __do_fork (void *aux) {
 		sema_up(&current->fork_sema);
 		do_iret (&if_);}
 error:
-        current->exit_status = -1;
-        sema_up (&current->fork_sema);
+        current->exit_status = -1;//fork 실패 표시. 부모가 이 값을 보고 TID_ERROR 반환 
+        sema_up (&current->fork_sema);//부모한테 신호 보내기
 	
-	   thread_exit ();
+	   thread_exit ();//프로세스 종료
 }
 
 
@@ -441,7 +442,7 @@ process_exit (void) {
 		
 
 		for (int i = 2;i < curr->next_fd; i++){
-	
+	    /*유저가 연 파일을 열려 있으면 닫기*/
 		if(!curr->fd_table[i])
 		{
                   continue;
@@ -449,13 +450,13 @@ process_exit (void) {
 	    file_close(curr->fd_table[i]);
 	}
       palloc_free_page (curr->fd_table);
-
-    if (curr->current_file) //현재 파일에 파일이 있으면
+    /*실행 파일이 보관돼 있으면 닫아서 쓰기 금지 해제 (rox)*/
+    if (curr->current_file) 
     {
        file_close (curr->current_file);
        curr->current_file = NULL;
     }
-    process_cleanup ();// 지금 프로세스의 유저 메모리를 전부 지움
+    process_cleanup ();// 지금 프로세스의 유저 메모리를 전부 반납
 
 	/* 내가 먼저 죽으면 내 자식들을 기다려 줄 부모가 없으니 풀어 준다. */
 	struct list_elem *e;
@@ -593,7 +594,9 @@ load (const char *file_name, struct intr_frame *if_) {
 		printf ("load: %s: open failed\n", file_name);
 		goto done;
 	}
-    file_deny_write(file);//파일 쓰기 금지
+    /*파일 쓰기 금지*/
+    file_deny_write(file);
+    /*load는 지역변수라 끝나면 사라져서 파일 종료시 닫을 수 있게 스레드에 보관*/
     t->current_file = file; 
     
 
