@@ -203,8 +203,13 @@ void syscall_handler(struct intr_frame *f)
 		f->R.rax = -1;
 		break;
 	    }
-             curr->fd_table[curr->next_fd]= opened;
+	    if(curr->next_fd >= FD_LIMIT)
+	     {
+		f->R.rax = -1;
+		break;
+	     }
 
+             curr->fd_table[curr->next_fd]= opened;
 	     f->R.rax =curr->next_fd;
 	     curr->next_fd++;
 	

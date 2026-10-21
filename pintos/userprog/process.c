@@ -113,6 +113,11 @@ process_fork (const char *name, struct intr_frame *if_) {
 	/*부모가 찾은 자식의 세마포어로 기다림*/
 	sema_down (&child->fork_sema);
 
+	if (child->exit_status == -1)
+	{
+		return TID_ERROR;
+	}
+
 	return tid;
 }
 
@@ -199,21 +204,20 @@ __do_fork (void *aux) {
 	 * TODO:       in include/filesys/file.h. Note that parent should not return
 	 * TODO:       from the fork() until this function successfully duplicates
 	 * TODO:       the resources of parent.*/
+	 current->next_fd = parent->next_fd;
         for (int i = 2;i < parent->next_fd; i++)
 	{
 		if(!parent->fd_table[i])
 		{
-                  continue;
+                continue;
 		}
 	current->fd_table[i] = file_duplicate(parent->fd_table[i]);
-
+   
 	if (!current->fd_table[i])
-	{
+	{   
 		goto error;
 	}
-        }
-	current->next_fd = parent->next_fd;
-
+   }
 
 	process_init ();
         
@@ -222,8 +226,10 @@ __do_fork (void *aux) {
 		sema_up(&current->fork_sema);
 		do_iret (&if_);}
 error:
+        current->exit_status = -1;
         sema_up (&current->fork_sema);
-	thread_exit ();
+	
+	   thread_exit ();
 }
 
 
