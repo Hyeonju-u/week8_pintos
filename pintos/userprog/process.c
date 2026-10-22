@@ -18,6 +18,7 @@
 #include "threads/mmu.h"
 #include "threads/vaddr.h"
 #include "intrinsic.h"
+#include "userprog/syscall.h"
 #ifdef VM
 #include "vm/vm.h"
 #endif
@@ -26,7 +27,6 @@ static void process_cleanup (void);
 static bool load (const char *file_name, struct intr_frame *if_);
 static void initd (void *f_name);
 static void __do_fork (void *);
-static void argument_stack (char **argv, int argc, struct intr_frame *if_);   /* ← 추가 */
 
 /* General process initializer for initd and other process. */
 static void
@@ -79,65 +79,132 @@ initd (void *f_name) {
 	NOT_REACHED ();
 }
 
-/* Clones the current process as `name`. Returns the new process's thread id, or
- * TID_ERROR if the thread cannot be created. */
+/* ===================================================================
+ * get_child: 내 자식 목록(children)에서 TID 를 가진 자식 스레드를 찾는다.
+ *   자식은 thread_create() 에서 부모의 children 리스트에 등록된다.
+ *   못 찾으면 NULL.
+ * =================================================================== */
+static struct thread *
+get_child (tid_t tid) {
+	struct list *l = &thread_current ()->children;
+	for (struct list_elem *e = list_begin (l); e != list_end (l); e = list_next (e)) {
+		/* list_elem(child_elem) 주소로부터 그걸 품고 있는 struct thread 를 꺼낸다 */
+		struct thread *t = list_entry (e, struct thread, child_elem);
+		if (t->tid == tid)
+			return t;
+	}
+	return NULL;
+}
+
+/* ===================================================================
+ * process_fork: [부모가 실행] 나를 복제한 자식 프로세스를 만든다.
+ *   반환값: 성공하면 자식 tid(= pid), 실패하면 TID_ERROR(-1).
+ *   흐름: 레지스터 맡겨 두기 → 자식 스레드 생성 → 자식이 복제를 끝낼 때까지 대기
+ * =================================================================== */
 tid_t
-process_fork (const char *name, struct intr_frame *if_ UNUSED) {
-	/* Clone current thread to new thread.*/
-	return thread_create (name,
-			PRI_DEFAULT, __do_fork, thread_current ());
+process_fork (const char *name, struct intr_frame *if_) {
+	struct thread *cur = thread_current ();
+
+	/* ① 부모의 사용자 레지스터(syscall_handler 가 받은 f)를 내 구조체에 복사해 둔다.
+	 *    자식(__do_fork)이 parent->parent_if 로 꺼내 간다.
+	 *    부모는 아래 sema_down 에서 잠들어 있으므로 그동안 값이 바뀌지 않는다. */
+	cur->parent_if = *if_;
+
+	/* ② 새 스레드를 만든다. 그 스레드는 __do_fork(cur) 를 실행한다.
+	 *    인자로 부모 자신(cur)을 넘겨서, 자식이 부모의 메모리·파일을 복사할 수 있게 한다. */
+	tid_t tid = thread_create (name, PRI_DEFAULT, __do_fork, cur);
+	if (tid == TID_ERROR)
+		return TID_ERROR;
+
+	/* ③ 방금 만든 자식을 찾아서, 자식이 복제를 끝낼 때까지 잠든다.
+	 *    기다리는 이유:
+	 *      - 부모가 먼저 돌아가 메모리를 바꾸면 자식이 바뀐 내용을 복사할 수 있다.
+	 *      - 복제가 실패했는지 알아야 -1 을 돌려줄 수 있다. */
+	struct thread *child = get_child (tid);
+	sema_down (&child->fork_sema);
+
+	/* ④ 복제 실패: 자식은 이미 exit(-1) 하는 중이다.
+	 *    process_wait 로 거둬 줘야 자식 구조체가 정리된다(안 하면 메모리 누수). */
+	if (!child->fork_success) {
+		process_wait (tid);
+		return TID_ERROR;
+	}
+
+	/* ⑤ 성공: 자식 tid 를 돌려준다. Pintos 는 프로세스 1개 = 스레드 1개라 tid 가 곧 pid. */
+	return tid;
 }
 
 #ifndef VM
-/* Duplicate the parent's address space by passing this function to the
- * pml4_for_each. This is only for the project 2. */
+/* ===================================================================
+ * duplicate_pte: [자식이 실행] 부모의 페이지 "한 장"을 자식에게 복사한다.
+ *   __do_fork 의 pml4_for_each 가 부모 페이지 테이블에 있는
+ *   페이지마다 이 함수를 한 번씩 불러 준다. false 를 돌려주면 fork 실패.
+ *   핵심: 같은 가상 주소(va)에 "새 물리 페이지"를 붙인다.
+ *         → 주소는 같지만 메모리는 따로라서 서로의 값을 못 바꾼다.
+ * =================================================================== */
 static bool
 duplicate_pte (uint64_t *pte, void *va, void *aux) {
-	struct thread *current = thread_current ();
-	struct thread *parent = (struct thread *) aux;
+	struct thread *current = thread_current ();    /* 자식 */
+	struct thread *parent = (struct thread *) aux; /* 부모 */
 	void *parent_page;
 	void *newpage;
 	bool writable;
 
-	/* 1. TODO: If the parent_page is kernel page, then return immediately. */
+	/* 1. 커널 영역은 모든 프로세스가 같이 쓰고, pml4_create 가 이미 넣어 줬다.
+	 *    복사하지 않고 "성공"으로 넘어간다(false 면 fork 전체가 실패하므로 true). */
+	if (is_kernel_vaddr (va))
+		return true;
 
-	/* 2. Resolve VA from the parent's page map level 4. */
+	/* 2. 부모의 가상 주소 va 가 실제로 가리키는 페이지(커널에서 접근 가능한 주소)를 얻는다. */
 	parent_page = pml4_get_page (parent->pml4, va);
 
-	/* 3. TODO: Allocate new PAL_USER page for the child and set result to
-	 *    TODO: NEWPAGE. */
+	/* 3. 자식용 새 페이지를 사용자 메모리 풀에서 받는다. 메모리가 없으면 fork 실패. */
+	newpage = palloc_get_page (PAL_USER);
+	if (newpage == NULL)
+		return false;
 
-	/* 4. TODO: Duplicate parent's page to the new page and
-	 *    TODO: check whether parent's page is writable or not (set WRITABLE
-	 *    TODO: according to the result). */
+	/* 4. 부모 페이지 내용 4KB 를 그대로 복사하고,
+	 *    쓰기 권한도 부모와 같게 맞춘다(코드 영역은 읽기 전용, 스택·데이터는 쓰기 가능). */
+	memcpy (newpage, parent_page, PGSIZE);
+	writable = is_writable (pte);
 
-	/* 5. Add new page to child's page table at address VA with WRITABLE
-	 *    permission. */
+	/* 5. 자식 페이지 테이블에 "va → newpage" 매핑을 등록한다.
+	 * 6. 실패하면 받은 페이지를 돌려주고 fork 실패를 알린다. */
 	if (!pml4_set_page (current->pml4, va, newpage, writable)) {
-		/* 6. TODO: if fail to insert page, do error handling. */
+		palloc_free_page (newpage);
+		return false;
 	}
 	return true;
 }
 #endif
 
-/* A thread function that copies parent's execution context.
- * Hint) parent->tf does not hold the userland context of the process.
- *       That is, you are required to pass second argument of process_fork to
- *       this function. */
+/* ===================================================================
+ * __do_fork: [자식이 실행] 부모를 복제해서 자식을 완성하고 사용자 모드로 출발한다.
+ *   process_fork 의 thread_create 로 만들어진 새 스레드가 처음 실행하는 함수.
+ *   복사하는 것: ① 레지스터 ② 메모리(페이지 테이블) ③ 열린 파일
+ * =================================================================== */
 static void
 __do_fork (void *aux) {
-	struct intr_frame if_;
-	struct thread *parent = (struct thread *) aux;
-	struct thread *current = thread_current ();
-	/* TODO: somehow pass the parent_if. (i.e. process_fork()'s if_) */
-	struct intr_frame *parent_if;
-	bool succ = true;
+	struct intr_frame if_;                          /* 자식이 사용자 모드로 돌아갈 때 쓸 레지스터 */
+	struct thread *parent = (struct thread *) aux;  /* process_fork 가 넘겨 준 부모 */
+	struct thread *current = thread_current ();     /* 나(자식) */
 
-	/* 1. Read the cpu context to local stack. */
+	/* 부모가 process_fork 에서 맡겨 둔 사용자 레지스터 */
+	struct intr_frame *parent_if = &parent->parent_if;
+
+	/* ① 레지스터 복사.
+	 *    rip(다음 실행할 위치)가 부모의 fork() 호출 다음이라서
+	 *    자식도 fork() 다음 줄부터 실행하게 된다. */
 	memcpy (&if_, parent_if, sizeof (struct intr_frame));
 
-	/* 2. Duplicate PT */
-	current->pml4 = pml4_create();
+	/* ★ rax 는 반환값 레지스터. 0 으로 바꿔서 "자식 쪽 fork() 는 0 을 반환"하게 한다.
+	 *   (부모 쪽 fork() 는 syscall_handler 에서 자식 pid 를 rax 에 넣는다) */
+	if_.R.rax = 0;
+
+	/* ② 메모리 복사.
+	 *    자식용 빈 페이지 테이블을 만들고, CPU 가 그걸 쓰도록 바꾼 뒤(process_activate),
+	 *    부모의 사용자 페이지를 전부 duplicate_pte 로 복사한다. */
+	current->pml4 = pml4_create ();
 	if (current->pml4 == NULL)
 		goto error;
 
@@ -151,21 +218,46 @@ __do_fork (void *aux) {
 		goto error;
 #endif
 
-	/* TODO: Your code goes here.
-	 * TODO: Hint) To duplicate the file object, use `file_duplicate`
-	 * TODO:       in include/filesys/file.h. Note that parent should not return
-	 * TODO:       from the fork() until this function successfully duplicates
-	 * TODO:       the resources of parent.*/
+	/* ③ 열린 파일 복사.
+	 *    file_duplicate 는 같은 파일을 가리키고 "읽기 위치까지 같은" 새 struct file 을 만든다.
+	 *      - fork-read : 부모가 읽던 위치부터 자식이 이어서 읽는다.
+	 *      - fork-close: 자식이 close 해도 자식 복사본만 닫혀서 부모는 계속 읽을 수 있다.
+	 *    포인터만 복사하면(current->fdt[fd] = parent->fdt[fd]) 자식이 닫을 때
+	 *    부모 파일까지 해제돼서 fork-close 가 실패한다. */
+	lock_acquire (&filesys_lock);
+	for (int fd = 2; fd < FDT_MAX; fd++) {
+		if (parent->fdt[fd] == NULL)            /* 빈 칸은 건너뜀 */
+			continue;
+		current->fdt[fd] = file_duplicate (parent->fdt[fd]);   /* 같은 fd 번호에 복사 */
+		if (current->fdt[fd] == NULL)           /* 메모리 부족 등으로 실패 */
+			goto error;                         /* 락은 error 의 sys_exit 가 풀어 준다 */
+	}
+	/* ③-2 실행 파일도 복사한다 (rox-child, rox-multichild).
+	 *      file_duplicate 는 쓰기 금지 상태까지 그대로 복사한다.
+	 *      그래서 부모가 먼저 끝나 자기 것을 닫아도, 자식이 실행 중인 동안은
+	 *      그 실행 파일에 쓰기가 계속 막혀 있다. */
+	if (parent->running_file != NULL) {
+		current->running_file = file_duplicate (parent->running_file);
+		if (current->running_file == NULL)
+			goto error;
+	}
+	lock_release (&filesys_lock);
 
 	process_init ();
 
-	/* Finally, switch to the newly created process. */
-	if (succ)
-		do_iret (&if_);
-error:
-	thread_exit ();
-}
+	/* ④ 복제 성공을 적고, process_fork 에서 잠든 부모를 깨운다. */
+	current->fork_success = true;
+	sema_up (&current->fork_sema);
 
+	/* ⑤ if_ 의 레지스터를 CPU 에 올리고 사용자 모드로 점프한다. 돌아오지 않는다. */
+	do_iret (&if_);
+
+error:
+	/* 실패해도 반드시 부모를 깨워야 한다. 안 그러면 부모가 sema_down 에서 영원히 잠든다.
+	 * fork_success 는 false 그대로이므로 부모는 실패를 알게 된다. */
+	sema_up (&current->fork_sema);
+	sys_exit (-1);
+}
 
 
 /* Switch the current execution context to the f_name.
@@ -278,47 +370,6 @@ process_exec (void *f_name) {
     NOT_REACHED ();
 }
 
-/* argv[0..argc-1] 문자열들을 x86-64 호출 규약에 맞게 사용자 스택에 쌓고,
- * main(argc, argv)의 인자가 되도록 rdi, rsi 레지스터를 채운다. */
-static void
-argument_stack (char **argv, int argc, struct intr_frame *if_) {
-	char *arg_addr[64];     /* 스택에 복사한 각 문자열의 사용자 주소 */
-	int i;
-
-	/* 1. 문자열 자체를 스택에 복사 (뒤의 인자부터, '\0' 포함) */
-	for (i = argc - 1; i >= 0; i--) {
-		size_t len = strlen (argv[i]) + 1;
-		if_->rsp -= len;
-		memcpy ((void *) if_->rsp, argv[i], len);
-		arg_addr[i] = (char *) if_->rsp;
-	}
-
-	/* 2. rsp를 8의 배수로 내린다 (word-align). 빈 칸은 0으로 채운다. */
-	while (if_->rsp % 8 != 0) {
-		if_->rsp--;
-		*(uint8_t *) if_->rsp = 0;
-	}
-
-	/* 3. argv[argc] = NULL (C 표준: argv 배열은 NULL로 끝난다) */
-	if_->rsp -= sizeof (char *);
-	*(char **) if_->rsp = NULL;
-
-	/* 4. argv[argc-1] ~ argv[0]: 문자열들의 주소를 쌓는다 */
-	for (i = argc - 1; i >= 0; i--) {
-		if_->rsp -= sizeof (char *);
-		*(char **) if_->rsp = arg_addr[i];
-	}
-
-	/* 5. main(argc, argv) 인자 전달: 1번째 인자 rdi, 2번째 인자 rsi */
-	if_->R.rdi = argc;
-	if_->R.rsi = if_->rsp;          /* 방금 쌓은 argv[0]의 위치 = argv 배열 시작 */
-
-	/* 6. 가짜 반환 주소 0. 보통 함수처럼 스택 맨 위에 반환 주소가 있는 모양을 맞춘다. */
-	if_->rsp -= sizeof (void *);
-	*(void **) if_->rsp = NULL;
-}
-
-
 /* Waits for thread TID to die and returns its exit status.  If
  * it was terminated by the kernel (i.e. killed due to an
  * exception), returns -1.  If TID is invalid or if it was not a
@@ -328,6 +379,13 @@ argument_stack (char **argv, int argc, struct intr_frame *if_) {
  *
  * This function will be implemented in problem 2-2.  For now, it
  * does nothing. */
+/* ===================================================================
+ * process_wait: 자식 CHILD_TID 가 끝날 때까지 기다렸다가 종료 코드를 돌려준다.
+ *   - 내 자식이 아니거나 이미 wait 한 자식이면 바로 -1.
+ *   - 자식과의 약속(세마포어 두 개):
+ *       wait_sema : 자식이 끝나면 up  → 부모가 깨어남
+ *       exit_sema : 부모가 종료 코드를 읽으면 up → 자식이 완전히 사라짐
+ * =================================================================== */
 int
 process_wait (tid_t child_tid) {
 	struct thread *curr = thread_current ();
@@ -359,30 +417,55 @@ process_wait (tid_t child_tid) {
 	return status;
 }
 
-/* Exit the process. This function is called by thread_exit (). */
+/* ===================================================================
+ * process_exit: 프로세스가 끝날 때 thread_exit() 안에서 불린다.
+ *   하는 일: ① 종료 메시지 출력 ② 열린 파일·fd 표 정리 ③ 메모리 정리
+ *           ④ 부모와의 wait 약속 지키기
+ * =================================================================== */
 void
 process_exit (void) {
 	struct thread *curr = thread_current ();
-	/* TODO: Your code goes here.
-	 * TODO: Implement process termination message (see
-	 * TODO: project2/process_termination.html).
-	 * TODO: We recommend you to implement process resource cleanup here. */
 
-	/* 사용자 프로세스(페이지 테이블이 있는 스레드)일 때만 종료 메시지를 찍는다.
-	 * 테스트는 정확히 "이름: exit(코드)" 한 줄을 기대한다. */
+	/* ① 사용자 프로세스(페이지 테이블이 있는 스레드)일 때만 종료 메시지를 찍는다.
+	 *    커널 스레드는 찍으면 안 된다. 테스트는 정확히 "이름: exit(코드)" 한 줄을 기대한다. */
 	if (curr->pml4 != NULL)
 		printf ("%s: exit(%d)\n", curr->name, curr->exit_status);
 
+	/* ② 열린 파일을 모두 닫고 fd 표 페이지를 돌려준다.
+	 *    안 하면 프로세스가 끝날 때마다 메모리가 새서 multi-oom 이 실패한다. */
+	if (curr->fdt != NULL) {
+		lock_acquire (&filesys_lock);
+		for (int fd = 2; fd < FDT_MAX; fd++)
+			if (curr->fdt[fd] != NULL)
+				file_close (curr->fdt[fd]);
+		lock_release (&filesys_lock);
+		palloc_free_page (curr->fdt);           /* thread_create 에서 받은 페이지 반납 */
+		curr->fdt = NULL;
+	}
+
+	/* ②-2 실행 파일을 닫는다 (rox).
+	 *      file_close 안에서 file_allow_write 가 불려 쓰기 금지가 풀린다.
+	 *      반드시 아래 sema_up (wait_sema) 보다 먼저 해야 한다:
+	 *      rox-child 는 부모가 wait 에서 깨어나자마자 그 파일에 쓰기를 시도한다. */
+	if (curr->running_file != NULL) {
+		lock_acquire (&filesys_lock);
+		file_close (curr->running_file);
+		lock_release (&filesys_lock);
+		curr->running_file = NULL;
+	}
+
+	/* ③ 사용자 메모리(페이지 테이블과 페이지들)를 해제한다. */
 	process_cleanup ();
 
-	/* 내가 먼저 죽으면 내 자식들을 기다려 줄 부모가 없으니 풀어 준다. */
+	/* ④-1 내가 먼저 죽으면 내 자식들을 wait 해 줄 부모가 없다.
+	 *      자식들이 process_exit 끝에서 exit_sema 를 기다리며 영원히 멈추지 않도록 미리 풀어 준다. */
 	struct list_elem *e;
 	for (e = list_begin (&curr->children); e != list_end (&curr->children);
 			e = list_next (e))
 		sema_up (&list_entry (e, struct thread, child_elem)->exit_sema);
 
-	/* 기다리는 부모를 깨우고, 부모가 exit_status를 읽을 때까지 기다린다.
-	 * 이 기다림이 없으면 부모가 읽기 전에 내 struct thread가 해제될 수 있다. */
+	/* ④-2 wait 중인 부모를 깨우고(wait_sema), 부모가 exit_status 를 다 읽을 때까지 기다린다(exit_sema).
+	 *      이 기다림이 없으면 부모가 읽기 전에 내 struct thread 가 해제될 수 있다. */
 	sema_up (&curr->wait_sema);
 	sema_down (&curr->exit_sema);
 }
@@ -496,6 +579,9 @@ load (const char *file_name, struct intr_frame *if_) {
 	off_t file_ofs;
 	bool success = false;
 	int i;
+	/* 실행 파일을 열고 읽는 동안 다른 프로세스가 파일 시스템을 못 건드리게 락을 잡는다.
+	 * 아래 어디서 goto done 이 일어나도 done 에서 풀리도록 맨 처음에 잡는다. */
+	lock_acquire (&filesys_lock);
 
 	/* Allocate and activate page directory. */
 	t->pml4 = pml4_create ();
@@ -587,12 +673,23 @@ load (const char *file_name, struct intr_frame *if_) {
 
 	success = true;
 
+	/* rox: 실행 중인 프로그램 파일은 아무도 고치지 못하게 막는다.
+	 *   1) exec 로 프로그램이 바뀌는 경우, 이전에 실행하던 파일은 닫는다(쓰기 금지 해제).
+	 *   2) 새 실행 파일에 쓰기 금지를 건다. 이제 누가 write 해도 0 바이트만 쓰인다.
+	 *   3) 닫지 않고 running_file 에 보관한다. 닫으면 쓰기 금지가 풀리기 때문이다.
+	 *      process_exit 에서 닫는다. */
+	if (t->running_file != NULL)
+		file_close (t->running_file);
+	file_deny_write (file);
+	t->running_file = file;
+
 done:
-	/* We arrive here whether the load is successful or not. */
-	file_close (file);
+	/* 실패했을 때만 여기서 닫는다. 성공했으면 위에서 running_file 로 넘겼다. */
+	if (!success)
+		file_close (file);
+	lock_release (&filesys_lock);
 	return success;
 }
-
 
 /* Checks whether PHDR describes a valid, loadable segment in
  * FILE and returns true if so, false otherwise. */

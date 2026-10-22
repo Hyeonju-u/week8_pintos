@@ -146,6 +146,9 @@ page_fault (struct intr_frame *f) {
 		return;
 #endif
 
+	if (user || is_user_vaddr (fault_addr))
+		sys_exit (-1);
+
 	/* Count page faults. */
 	page_fault_cnt++;
 

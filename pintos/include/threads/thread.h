@@ -30,6 +30,7 @@ struct lock;
 #define PRI_MIN 0                       /* Lowest priority. */
 #define PRI_DEFAULT 31                  /* Default priority. */
 #define PRI_MAX 63                      /* Highest priority. */
+#define FDT_MAX 512                     /* fd 표 크기 (페이지 1장 = 포인터 512칸) */
 
 /* A kernel thread or user process.
  *
@@ -113,7 +114,15 @@ struct thread {
 	struct list_elem child_elem;        /* 부모의 children 리스트에 들어갈 고리 */
 	struct semaphore wait_sema;         /* 자식이 죽으면 up → 기다리던 부모가 깨어남 */
 	struct semaphore exit_sema;         /* 부모가 종료 코드를 읽으면 up → 자식이 마저 사라짐 */
+	struct intr_frame parent_if;   /* 부모: fork 순간의 사용자 레지스터 */
+	struct semaphore fork_sema;    /* 자식: 복제 끝나면 up */
+	bool fork_success;             /* 자식: 복제 성공 여부 */
+	struct file **fdt;             /* fd 표: fdt[fd] = 열린 파일 */
+		/* Project 2: rox (실행 중인 파일 쓰기 금지) */
+	struct file *running_file;     /* 지금 실행 중인 내 실행 파일. load() 가 열어서 쓰기 금지를 걸고
+	                                  여기 보관한다. process_exit 에서 닫으면 쓰기 금지도 풀린다. */
 #endif
+
 #ifdef VM
 	/* Table for whole virtual memory owned by thread. */
 	struct supplemental_page_table spt;

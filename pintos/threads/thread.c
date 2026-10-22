@@ -195,8 +195,11 @@ thread_create (const char *name, int priority,
 	init_thread (t, name, priority);
 	tid = t->tid = allocate_tid ();
 #ifdef USERPROG
-	/* 새 스레드를 만든 스레드(부모)의 자식 목록에 등록한다.
-	 * thread_unblock 전에 해야 자식이 먼저 실행돼 끝나도 목록에서 찾을 수 있다. */
+	t->fdt = palloc_get_page (PAL_ZERO);     /* fd 표 한 페이지 (0으로 채워짐) */
+	if (t->fdt == NULL) {
+		palloc_free_page (t);
+		return TID_ERROR;
+	}
 	list_push_back (&thread_current ()->children, &t->child_elem);
 #endif
 
@@ -470,7 +473,10 @@ init_thread (struct thread *t, const char *name, int priority) {
 	t->init_priority = priority;
 	t->wait_on_lock = NULL;
 	list_init (&t->donations);
+
 #ifdef USERPROG
+	sema_init (&t->fork_sema, 0);
+	t->fork_success = false;
 	t->exit_status = 0;
 	list_init (&t->children);
 	sema_init (&t->wait_sema, 0);
